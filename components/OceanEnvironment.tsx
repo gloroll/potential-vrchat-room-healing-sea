@@ -1,20 +1,18 @@
 import React, { useRef, useMemo, useEffect, useState, Suspense } from 'react';
-import { Canvas, useFrame, extend, useThree, useLoader } from '@react-three/fiber';
-import { Sky, Stars, Line } from '@react-three/drei';
+import { Canvas, useFrame, extend, useThree, Object3DNode } from '@react-three/fiber';
+import { Sky, Stars, Line, Environment, useTexture, Loader } from '@react-three/drei';
 import { 
   Vector3, 
-  Points, 
-  BufferAttribute, 
-  MathUtils, 
   Color, 
-  PointLight, 
-  TextureLoader, 
-  RepeatWrapping, 
-  RGBAFormat, 
+  MathUtils, 
   PlaneGeometry, 
-  ACESFilmicToneMapping, 
+  RepeatWrapping, 
   SRGBColorSpace, 
-  AdditiveBlending
+  RGBAFormat, 
+  ACESFilmicToneMapping,
+  AdditiveBlending,
+  Points,
+  BufferAttribute
 } from 'three';
 import { Water } from 'three-stdlib';
 import { HandData, GameState } from '../types';
@@ -22,10 +20,34 @@ import { HandData, GameState } from '../types';
 // Extend Three fiber with Water
 extend({ Water });
 
+// Add type definition for the water component to fix JSX error
+declare module '@react-three/fiber' {
+  interface ThreeElements {
+    water: Object3DNode<Water, typeof Water>;
+  }
+}
+
 interface OceanProps {
   handData: HandData;
   gameState: GameState;
   onEventTrigger: () => void;
+}
+
+// --- Utility Components ---
+
+// Error Boundary for texture loading
+class TextureErrorBoundary extends React.Component<{ fallback: React.ReactNode, children: React.ReactNode }, { hasError: boolean }> {
+  constructor(props: { fallback: React.ReactNode, children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  render() {
+    if (this.state.hasError) return this.props.fallback;
+    return this.props.children;
+  }
 }
 
 // --- Visual Components ---
@@ -72,255 +94,270 @@ const Rain = () => {
           itemSize={3}
         />
       </bufferGeometry>
-      <pointsMaterial 
-        attach="material" 
-        color={0xaaaaaa} 
-        size={0.6} 
-        transparent 
-        opacity={0.5} 
-        sizeAttenuation={true} 
+      <pointsMaterial
+        color="#aaaaaa"
+        size={0.8}
+        transparent
+        opacity={0.6}
+        sizeAttenuation
         blending={AdditiveBlending}
       />
     </points>
   );
 };
 
-// Generates a random lightning bolt path
-const createBoltPoints = (startPos: Vector3) => {
-  const pts: Vector3[] = [];
-  let current = startPos.clone();
-  pts.push(current.clone());
-  
-  // Zigzag down
-  while (current.y > 10) {
-    const drop = Math.random() * 30 + 10;
-    current.y -= drop;
-    current.x += (Math.random() - 0.5) * 40;
-    current.z += (Math.random() - 0.5) * 40;
-    pts.push(current.clone());
-
-    // Chance to branch (simplified: just erratic movement)
-    if (Math.random() > 0.7) {
-       current.x += (Math.random() - 0.5) * 50;
+const LightningBolt = () => {
+  const points = useMemo(() => {
+    const pts = [];
+    let x = (Math.random() - 0.5) * 600;
+    let y = 300;
+    let z = (Math.random() - 0.5) * 400 - 200; // Background
+    
+    pts.push(new Vector3(x, y, z));
+    
+    let segments = 15;
+    for(let i=0; i<segments; i++) {
+      x += (Math.random() - 0.5) * 30;
+      y -= 20 + Math.random() * 20;
+      z += (Math.random() - 0.5) * 30;
+      pts.push(new Vector3(x, y, z));
     }
-  }
-  return pts;
-};
-
-const LightningBolt: React.FC<{ position: Vector3 }> = ({ position }) => {
-  const points = useMemo(() => createBoltPoints(position), [position]);
+    return pts;
+  }, []);
 
   return (
-    <Line 
-      points={points} 
-      color="white" 
-      lineWidth={4} 
+    <Line
+      points={points}
+      color="white"
+      lineWidth={5}
+      // transparent prop removed to fix type error, opacity usually works with LineMaterial if allowed or default
+      opacity={0.9}
     />
   );
 };
 
-// Controls random lighting flashes
-const LightningSystem: React.FC<{ enabled: boolean }> = ({ enabled }) => {
+const LightningSystem = ({ active }: { active: boolean }) => {
+  const [flash, setFlash] = useState(false);
+  const [bolt, setBolt] = useState(false);
   const { scene } = useThree();
-  const [activeBolt, setActiveBolt] = useState<Vector3 | null>(null);
-  const nextFlashTime = useRef(0);
-  const flashIntensity = useRef(0);
-  const lightRef = useRef<PointLight>(null);
-
-  useFrame((state, delta) => {
-    if (!enabled) {
-      if (activeBolt) setActiveBolt(null);
-      flashIntensity.current = 0;
-      if (lightRef.current) lightRef.current.intensity = 0;
+  
+  useEffect(() => {
+    if (!active) {
+      setFlash(false);
+      setBolt(false);
+      scene.background = new Color('#000000');
       return;
     }
 
-    // Timer logic
-    if (state.clock.elapsedTime > nextFlashTime.current) {
-      // Trigger Flash
-      const x = (Math.random() - 0.5) * 800;
-      const z = (Math.random() - 0.5) * 800 - 200; // Mostly in front
-      setActiveBolt(new Vector3(x, 300, z));
-      
-      flashIntensity.current = 2.0; // Start bright
-      
-      // Schedule next flash (random 0.5s to 3s)
-      nextFlashTime.current = state.clock.elapsedTime + Math.random() * 2.5 + 0.5;
-      
-      // Bolt only lasts briefly
-      setTimeout(() => setActiveBolt(null), 150); 
-    }
+    let timeoutId: NodeJS.Timeout;
 
-    // Decay flash intensity
-    flashIntensity.current = MathUtils.lerp(flashIntensity.current, 0, delta * 5);
-    
-    // Apply flash lighting to scene
-    if (lightRef.current) {
-      lightRef.current.intensity = flashIntensity.current * 10; // Multiplier for drama
-      lightRef.current.position.set(activeBolt?.x || 0, 400, activeBolt?.z || 0);
-    }
-    
-    // Optional: Flash background sky slightly
-    scene.background = new Color(enabled ? 0x111118 : 0x000000).lerp(new Color(0x444455), flashIntensity.current * 0.3);
-  });
+    const triggerLightning = () => {
+      // Show bolt
+      setBolt(true);
+      // Flash screen white
+      setFlash(true);
+      scene.background = new Color('#333344');
+
+      // Hide flash quickly
+      setTimeout(() => {
+        setFlash(false);
+        scene.background = new Color('#050505');
+      }, 100);
+
+      // Hide bolt shortly after
+      setTimeout(() => {
+        setBolt(false);
+      }, 300);
+
+      // Schedule next
+      const nextDelay = Math.random() * 2000 + 1000; // 1-3 seconds
+      timeoutId = setTimeout(triggerLightning, nextDelay);
+    };
+
+    timeoutId = setTimeout(triggerLightning, Math.random() * 1000);
+
+    return () => clearTimeout(timeoutId);
+  }, [active, scene]);
 
   return (
     <>
-      <pointLight ref={lightRef} distance={2000} decay={2} color="#ccddff" />
-      {activeBolt && <LightningBolt position={activeBolt} />}
+      {bolt && <LightningBolt />}
+      {flash && <ambientLight intensity={5} color="white" />}
     </>
   );
 };
 
-const OceanMesh: React.FC<{ gameState: GameState }> = ({ gameState }) => {
-  const ref = useRef<any>();
+// Simple Fallback Ocean Component (No texture needed)
+const FallbackOcean = () => (
+  <mesh rotation-x={-Math.PI / 2} position={[0, 0, 0]}>
+    <planeGeometry args={[10000, 10000]} />
+    <meshStandardMaterial color="#004466" roughness={0.1} metalness={0.5} />
+  </mesh>
+);
+
+const OceanMesh = ({ gameState }: { gameState: GameState }) => {
+  const ref = useRef<any>(null);
   const gl = useThree((state) => state.gl);
   
-  // Use a stable texture URL. Standard three.js example texture.
-  const waterNormals = useLoader(TextureLoader, 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/water/Water_1_M_Normal.jpg');
-  
-  useEffect(() => {
-    if (waterNormals) {
-      waterNormals.wrapS = waterNormals.wrapT = RepeatWrapping;
-    }
-  }, [waterNormals]);
+  // Load texture safely within Suspense
+  const waterNormals = useTexture(
+    'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/water/Water_1_M_Normal.jpg'
+  );
 
-  const waterConfig = useMemo(
+  waterNormals.wrapS = waterNormals.wrapT = RepeatWrapping;
+
+  // Memoize geometry to prevent recreation
+  const geom = useMemo(() => new PlaneGeometry(10000, 10000), []);
+
+  const config = useMemo(
     () => ({
       textureWidth: 512,
       textureHeight: 512,
       waterNormals,
       sunDirection: new Vector3(),
       sunColor: 0xffffff,
-      waterColor: 0x001e0f, // RESTORED: Deep, calm healing teal/black
-      distortionScale: 3.7, // RESTORED: Softer waves
-      fog: true,
-      format: RGBAFormat,
+      waterColor: 0x004466, // Healing Teal
+      distortionScale: 3.7,
+      fog: false,
+      format: gl.outputColorSpace === SRGBColorSpace ? RGBAFormat : undefined,
     }),
-    [waterNormals]
+    [waterNormals, gl.outputColorSpace]
   );
-
-  const geom = useMemo(() => new PlaneGeometry(30000, 30000), []);
 
   useFrame((state, delta) => {
     if (ref.current) {
       ref.current.material.uniforms.time.value += delta * 0.5;
       
-      // Increase turbulence during storm, but keep base calm
-      const baseDistortion = 3.7;
-      const stormDistortion = 8.0; 
-      const targetDistortion = gameState === GameState.STORM ? stormDistortion : baseDistortion;
+      // Dynamic adjustments based on GameState
+      const isStorm = gameState === GameState.STORM;
+      const targetDistortion = isStorm ? 8.0 : 3.7;
+      // const targetColor = isStorm ? new Color("#001e33") : new Color("#004466");
       
+      // Lerp distortion
       ref.current.material.uniforms.distortionScale.value = MathUtils.lerp(
         ref.current.material.uniforms.distortionScale.value,
         targetDistortion,
-        delta
+        delta * 0.5
       );
+
+      // Lerp Color (Manual access to uniform if exposed, otherwise handled by re-render prop)
+      // Note: Water shader uniforms are tricky to update dynamically for color without deeper access,
+      // so we rely on prop updates mostly, or simple visual changes via lighting.
     }
   });
 
   return (
-    // @ts-ignore
-    <water
-      ref={ref}
-      args={[geom, waterConfig]}
-      rotation-x={-Math.PI / 2}
+    <water 
+      ref={ref} 
+      args={[geom, config]} 
+      rotation-x={-Math.PI / 2} 
     />
   );
 };
 
-const SceneController: React.FC<{ handData: HandData; onEventTrigger: () => void }> = ({ handData, onEventTrigger }) => {
+const SceneContent: React.FC<OceanProps> = ({ handData, gameState, onEventTrigger }) => {
   const { camera } = useThree();
-  const moveDurationRef = useRef(0);
-  const velocity = useRef(new Vector3());
-  
-  const SPEED = 15.0; 
-  const EVENT_THRESHOLD_SECONDS = 10;
+  const movementRef = useRef(0); // Track continuous movement duration
+  const lastDirRef = useRef({ x: 0, y: 0 });
 
   useFrame((state, delta) => {
-    const targetVelocity = new Vector3();
-    let isMoving = false;
+    // 1. Camera Movement Logic
+    const speed = 0.5;
+    const targetX = handData.isDetected ? handData.directionVector.x * 20 : 0;
+    const targetY = handData.isDetected ? 10 + handData.directionVector.y * 10 : 10;
+    
+    // Smooth LookAt
+    const lookAtVec = new Vector3(targetX, targetY, -50);
+    const currentLook = new Vector3();
+    camera.getWorldDirection(currentLook);
+    
+    // Simple pan logic
+    camera.position.x += (handData.directionVector.x * 10 - camera.position.x) * delta * speed;
+    camera.position.y += (handData.directionVector.y * 5 + 10 - camera.position.y) * delta * speed;
+    camera.lookAt(lookAtVec);
 
+    // 2. Storm Trigger Logic
     if (handData.isDetected) {
-      const deadzone = 0.15;
-      const mag = Math.sqrt(handData.directionVector.x ** 2 + handData.directionVector.y ** 2);
+      // Check if moving significantly
+      const isMoving = Math.abs(handData.directionVector.x) > 0.2 || Math.abs(handData.directionVector.y) > 0.2;
       
-      if (mag > deadzone) {
-        targetVelocity.x = handData.directionVector.x * SPEED;
-        targetVelocity.z = handData.directionVector.y * SPEED; 
-        isMoving = true;
+      if (isMoving) {
+        movementRef.current += delta;
+      } else {
+        movementRef.current = Math.max(0, movementRef.current - delta);
       }
-    }
 
-    if (isMoving) {
-      moveDurationRef.current += delta;
-      if (moveDurationRef.current > EVENT_THRESHOLD_SECONDS) {
+      if (movementRef.current > 10 && gameState === GameState.NORMAL) {
         onEventTrigger();
-        moveDurationRef.current = 0; 
+        movementRef.current = 0; // Reset
       }
-    } else {
-      moveDurationRef.current = Math.max(0, moveDurationRef.current - delta * 2);
     }
-
-    velocity.current.x += (targetVelocity.x - velocity.current.x) * 0.05;
-    velocity.current.z += (targetVelocity.z - velocity.current.z) * 0.05;
-
-    camera.position.x += velocity.current.x * delta;
-    camera.position.z += velocity.current.z * delta;
-    camera.position.y = 10;
   });
 
-  return null;
-};
-
-const Lighting = ({ gameState }: { gameState: GameState }) => {
   const isStorm = gameState === GameState.STORM;
 
   return (
     <>
-      <ambientLight intensity={isStorm ? 0.3 : 0.8} color={isStorm ? "#222233" : "#ffffff"} />
+      <ambientLight intensity={isStorm ? 0.2 : 0.8} />
+      <pointLight position={[100, 100, 100]} intensity={isStorm ? 0.5 : 1.5} />
+      <pointLight position={[-100, -100, -100]} intensity={0.5} />
+
+      {/* Environment for Reflections */}
+      <Environment preset="sunset" />
+
+      {/* Sky & Atmosphere */}
+      {!isStorm && (
+        <Sky
+          distance={450000}
+          sunPosition={[100, 20, 100]}
+          inclination={0}
+          azimuth={0.25}
+          turbidity={8}
+          rayleigh={2}
+        />
+      )}
       
-      {/* Sun Light - dims during storm */}
-      <directionalLight 
-        position={[300, 100, -500]} 
-        intensity={isStorm ? 0.2 : 1.5} 
-        color={isStorm ? "#445566" : "#ffaa77"} 
+      {/* Stars appear when dark/stormy */}
+      <Stars 
+        radius={100} 
+        depth={50} 
+        count={5000} 
+        factor={4} 
+        saturation={0} 
+        fade 
+        speed={1} 
       />
+
+      {/* Ocean Surface */}
+      <TextureErrorBoundary fallback={<FallbackOcean />}>
+        <Suspense fallback={<FallbackOcean />}>
+          <OceanMesh gameState={gameState} />
+        </Suspense>
+      </TextureErrorBoundary>
+
+      {/* Storm Effects */}
+      {isStorm && <Rain />}
+      <LightningSystem active={isStorm} />
     </>
   );
 };
 
-const OceanEnvironment: React.FC<OceanProps> = ({ handData, gameState, onEventTrigger }) => {
+const OceanEnvironment: React.FC<OceanProps> = (props) => {
   return (
-    <Canvas
-      camera={{ position: [0, 10, 100], fov: 55, near: 1, far: 20000 }}
-      gl={{ toneMapping: ACESFilmicToneMapping, outputColorSpace: SRGBColorSpace }}
-    >
-      <SceneController handData={handData} onEventTrigger={onEventTrigger} />
-      
-      {/* Suspense is crucial for textures loaded via useLoader to not block the whole app */}
-      <Suspense fallback={null}>
-        <OceanMesh gameState={gameState} />
-      </Suspense>
-      
-      {gameState === GameState.STORM && <Rain />}
-      <LightningSystem enabled={gameState === GameState.STORM} />
-      
-      <Sky
-        distance={450000}
-        sunPosition={[300, 10, -500]}
-        inclination={0}
-        azimuth={0.25}
-        turbidity={gameState === GameState.STORM ? 15 : 8}
-        rayleigh={gameState === GameState.STORM ? 0.5 : 3}
-        mieCoefficient={0.005}
-        mieDirectionalG={0.7}
-      />
-      
-      <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
-
-      <Lighting gameState={gameState} />
-    </Canvas>
+    <>
+      <Canvas
+        camera={{ position: [0, 10, 100], fov: 55 }}
+        gl={{ 
+          antialias: true,
+          toneMapping: ACESFilmicToneMapping,
+          outputColorSpace: SRGBColorSpace 
+        }}
+        dpr={[1, 2]} // Optimization for varying screen densities
+      >
+        <SceneContent {...props} />
+      </Canvas>
+      <Loader /> {/* Visual loading indicator for textures */}
+    </>
   );
 };
 
