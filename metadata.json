@@ -1,0 +1,7 @@
+{
+  "name": "Healing Ocean 3D",
+  "description": "A 3D ocean experience controlled by hand gestures with realistic water and atmospheric effects.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
